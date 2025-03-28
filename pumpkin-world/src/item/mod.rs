@@ -1,5 +1,5 @@
 use pumpkin_data::item::Item;
-use pumpkin_data::tag::{RegistryKey, get_tag_values};
+use pumpkin_data::tag::{get_tag_values, RegistryKey};
 use pumpkin_nbt::compound::NbtCompound;
 
 mod categories;
@@ -30,6 +30,40 @@ impl PartialEq for ItemStack {
 impl ItemStack {
     pub fn new(item_count: u8, item: Item) -> Self {
         Self { item_count, item }
+    }
+
+    pub fn damage_item(&mut self) {
+        let components = &mut self.item.components;
+
+        if let (Some(_damage), Some(_max_damage)) = (components.damage, components.max_damage) {
+            if _max_damage == 0 {
+                return;
+            }
+
+            if _damage >= _max_damage {
+                log::warn!("This item is broken, cannot be used.");
+
+                return;
+            }
+
+            components.damage = Some(_damage + 3);
+
+            log::warn!("Durability {} / {}", _damage + 1, _max_damage);
+        }
+    }
+
+    pub fn is_broken(&self) -> bool {
+        let components = self.item.components;
+
+        if let (Some(_damage), Some(_max_damage)) = (components.damage, components.max_damage) {
+            return _max_damage > 0 && _damage >= _max_damage;
+        }
+
+        false
+    }
+
+    async fn break_item(&self) {
+      
     }
 
     /// Determines the mining speed for a block based on tool rules.
@@ -108,9 +142,16 @@ impl ItemStack {
         compound.put_int("count", self.item_count as i32);
 
         // Create a tag compound for additional data
-        let tag = NbtCompound::new();
+        let mut tag = NbtCompound::new();
 
         // TODO: Store custom data like enchantments, display name, etc. would go here
+        if let Some(damage) = self.item.components.damage {
+            tag.put_int("damage", damage as i32);
+        }
+
+        if let Some(max_damage) = self.item.components.max_damage {
+            tag.put_int("max_damage", max_damage as i32);
+        }
 
         // Store custom data like enchantments, display name, etc. would go here
         compound.put_component("components", tag);
@@ -124,17 +165,25 @@ impl ItemStack {
         let registry_key = full_id.strip_prefix("minecraft:").unwrap_or(full_id);
 
         // Try to get item by registry key
-        let item = Item::from_registry_key(registry_key)?;
+        let mut item = Item::from_registry_key(registry_key)?.clone();
+
+        // Process any additional data in the components compound
+        if let Some(_tag) = compound.get_compound("components") {
+            if let Some(_damage) = _tag.get_int("damage") {
+                item.components.damage = Some(_damage as u16);
+            }
+
+            if let Some(_max_damage) = _tag.get_int("max_damage") {
+                item.components.max_damage = Some(_max_damage as u16);
+            }
+
+            // TODO: Process additional components like damage, enchantments, etc.
+        }
 
         let count = compound.get_int("count")? as u8;
 
         // Create the item stack
         let item_stack = Self::new(count, item);
-
-        // Process any additional data in the components compound
-        if let Some(_tag) = compound.get_compound("components") {
-            // TODO: Process additional components like damage, enchantments, etc.
-        }
 
         Some(item_stack)
     }

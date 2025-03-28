@@ -18,15 +18,15 @@ use crate::{
 };
 use pumpkin_config::advanced_config;
 use pumpkin_data::block::{Block, HorizontalFacing};
-use pumpkin_data::entity::{EntityType, entity_from_egg};
+use pumpkin_data::entity::{entity_from_egg, EntityType};
 use pumpkin_data::item::Item;
 use pumpkin_data::sound::Sound;
 use pumpkin_data::sound::SoundCategory;
 use pumpkin_data::world::CHAT;
-use pumpkin_inventory::InventoryError;
 use pumpkin_inventory::player::{
     PlayerInventory, SLOT_HOTBAR_END, SLOT_HOTBAR_START, SLOT_OFFHAND,
 };
+use pumpkin_inventory::InventoryError;
 use pumpkin_macros::{block_entity, send_cancellable};
 use pumpkin_protocol::client::play::{
     CBlockEntityData, CBlockUpdate, COpenSignEditor, CPlayerPosition, CSetContainerSlot,
@@ -54,13 +54,13 @@ use pumpkin_util::math::boundingbox::BoundingBox;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::text::color::NamedColor;
 use pumpkin_util::{
-    GameMode,
     math::{vector3::Vector3, wrap_degrees},
     text::TextComponent,
+    GameMode,
 };
 use pumpkin_world::block::interactive::sign::Sign;
 use pumpkin_world::block::registry::get_block_collision_shapes;
-use pumpkin_world::block::{BlockDirection, registry::get_block_by_item};
+use pumpkin_world::block::{registry::get_block_by_item, BlockDirection};
 use pumpkin_world::item::ItemStack;
 
 use thiserror::Error;
@@ -551,7 +551,7 @@ impl Player {
             }
             None if self.gamemode.load() == GameMode::Creative => {
                 // Case where item is not present, if in creative mode create the item
-                let item_stack = ItemStack::new(1, Item::from_id(block.item_id).unwrap());
+                let item_stack = ItemStack::new(1, Item::from_id(block.item_id).unwrap().clone());
                 self.update_single_slot(&mut inventory, dest_slot + SLOT_HOTBAR_START, item_stack)
                     .await;
 
@@ -1086,6 +1086,18 @@ impl Player {
                                 broken_state,
                             )
                             .await;
+
+                        let mut inventory = self.inventory().lock().await;
+                        let held_item = inventory.held_item().cloned();
+
+                        if let Some(item) = held_item {
+                            if item.is_broken() {
+                              log::warn!("Finished digging, will decrease stack amount");
+      
+                              inventory.decrease_current_stack(1);
+                            }
+                          }
+                        drop(inventory);
                     }
                     self.update_sequence(player_action.sequence.0);
                 }
@@ -1156,6 +1168,7 @@ impl Player {
         if !self.has_client_loaded() {
             return Ok(());
         }
+
         self.update_sequence(use_item_on.sequence.0);
 
         let location = use_item_on.location;
@@ -1173,18 +1186,23 @@ impl Player {
         let inventory = self.inventory().lock().await;
         let slot_id = inventory.get_selected_slot();
         let held_item = inventory.held_item().cloned();
+
         drop(inventory);
 
         let entity = &self.living_entity.entity;
+
         let world = &entity.world.read().await;
+
         let Ok(block) = world.get_block(&location).await else {
             return Err(BlockPlacingError::NoBaseBlock.into());
         };
+
         let sneaking = self
             .living_entity
             .entity
             .sneaking
             .load(std::sync::atomic::Ordering::Relaxed);
+
         let Some(stack) = held_item else {
             if !sneaking {
                 // Using block with empty hand
@@ -1195,23 +1213,36 @@ impl Player {
             }
             return Ok(());
         };
-        if !sneaking {
-            server
-                .item_registry
-                .use_on_block(&stack.item, self, location, &face, &block, server)
-                .await;
 
-            let action_result = server
-                .block_registry
-                .use_with_item(&block, self, location, &stack.item, server, world)
-                .await;
-            match action_result {
-                BlockActionResult::Continue => {}
-                BlockActionResult::Consume => {
-                    return Ok(());
-                }
+        server
+            .item_registry
+            .use_on_block(&stack.item, self, location, &face, &block, server)
+            .await;
+
+        let action_result = server
+            .block_registry
+            .use_with_item(&block, self, location, &stack.item, server, world)
+            .await;
+
+        let mut inventory = self.inventory().lock().await;
+        let held_item = inventory.held_item().cloned();
+
+        if let Some(item) = held_item {
+            if item.is_broken() {
+              log::warn!("Used on block and broke, removing it");
+
+              inventory.decrease_current_stack(1);
+            }
+          }
+        drop(inventory);
+
+        match action_result {
+            BlockActionResult::Continue => {}
+            BlockActionResult::Consume => {
+                return Ok(());
             }
         }
+
         // Check if the item is a block, because not every item can be placed :D
         if let Some(block) = get_block_by_item(stack.item.id) {
             should_try_decrement = self
@@ -1224,30 +1255,43 @@ impl Player {
             should_try_decrement = true;
         };
 
-        if should_try_decrement {
-            // TODO: Config
-            // Decrease block count
-            if self.gamemode.load() != GameMode::Creative {
-                let mut inventory = self.inventory().lock().await;
+        let inventory = self.inventory().lock().await;
+        let held_item = inventory.held_item().cloned();
 
-                if !inventory.decrease_current_stack(1) {
-                    return Err(BlockPlacingError::InventoryInvalid.into());
-                }
-                // TODO: this should be by use item on not currently selected as they might be different
-                let _ = self
-                    .handle_decrease_item(
-                        server,
-                        slot_id as i16,
-                        inventory.held_item().cloned().as_ref(),
-                        &mut inventory.state_id,
-                    )
-                    .await;
-            }
+        drop(inventory);
+
+        if let Some(value) = self.decrease_stack_amount(server, should_try_decrement, slot_id, held_item).await {
+            return value;
         }
 
         Ok(())
     }
 
+    async fn decrease_stack_amount(&self, server: &Server, should_try_decrement: bool, slot_id: usize, item: Option<ItemStack>) -> Option<Result<(), Box<dyn PumpkinError>>> {
+        if should_try_decrement {
+            // TODO: Config
+            // Decrease block count
+            if self.gamemode.load() != GameMode::Creative {
+                let mut inventory = self.inventory().lock().await;
+    
+                if !inventory.decrease_current_stack(1) {
+                    return Some(Err(BlockPlacingError::InventoryInvalid.into()));
+                }
+
+                // TODO: this should be by use item on not currently selected as they might be different
+                let _ = self
+                    .handle_decrease_item(
+                        server,
+                        slot_id as i16,
+                        item.as_ref(),
+                        &mut inventory.state_id,
+                    )
+                    .await;
+            }
+        }
+        None
+    }
+    
     pub async fn handle_sign_update(&self, sign_data: SUpdateSign) {
         let world = &self.living_entity.entity.world.read().await;
         let updated_sign = Sign::new(
@@ -1272,12 +1316,27 @@ impl Player {
             .await;
     }
 
-    pub async fn handle_use_item(&self, _use_item: &SUseItem, server: &Server) {
+    pub async fn handle_use_item(&self, _use_item: &SUseItem, server: &Arc<Server>) {
         if !self.has_client_loaded() {
             return;
         }
-        if let Some(held) = self.inventory().lock().await.held_item() {
-            server.item_registry.on_use(&held.item, self).await;
+        let mut inventory = self.inventory().lock().await;
+        
+        if let Some(item_stack) = inventory.held_item() {
+            if !item_stack.is_broken() {
+              log::warn!("Item is not broken, using it");
+              server.item_registry.on_use(&item_stack.item, self).await;
+
+              if item_stack.is_broken() {
+                log::warn!("Finished use item, will decrease stack amount");
+                
+                inventory.decrease_current_stack(1);
+
+                drop(inventory);
+              }
+            } else {
+              log::warn!("handle_use_item: this item is broken and cannot be used");
+            }
         }
     }
 

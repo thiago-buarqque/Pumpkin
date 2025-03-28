@@ -14,6 +14,20 @@ pub trait ItemMetadata {
 pub trait PumpkinItem: Send + Sync {
     async fn normal_use(&self, _block: &Item, _player: &Player) {}
 
+    async fn is_damage_item_on_after_use_on(&self, item: &Item) -> bool {
+        false
+    }
+
+    async fn is_damage_item_on_after_normal_use(&self) -> bool {
+        false
+    }
+
+    async fn is_damage_item_on_dig(&self) -> bool {
+        false
+    }
+
+    async fn on_dig(&self, _block: &Item, _player: &Player) {}
+
     async fn use_on_block(
         &self,
         _item: &Item,

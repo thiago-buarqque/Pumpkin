@@ -27,6 +27,23 @@ impl ItemMetadata for HoeItem {
 
 #[async_trait]
 impl PumpkinItem for HoeItem {
+    async fn normal_use(&self, _block: &Item, _player: &Player) {
+        log::warn!("Normal use");
+        //let mut inventory = _player.inventory().lock().await;
+        //
+        //if let Some(held) = inventory.held_item_mut() {
+        //    held.damage_item();
+        //}
+    }
+
+    async fn is_damage_item_on_after_normal_use(&self) -> bool {
+        true
+    }
+
+    async fn is_damage_item_on_dig(&self) -> bool {
+        true
+    }
+
     async fn use_on_block(
         &self,
         _item: &Item,
@@ -54,8 +71,20 @@ impl PumpkinItem for HoeItem {
                         BlockFlags::NOTIFY_ALL,
                     )
                     .await;
+
+                log::warn!("Use on block - success");
+                let mut inventory = player.inventory().lock().await;
+
+                if let Some(held) = inventory.held_item_mut() {
+                    held.damage_item();
+                }
+
+                drop(inventory);
+            } else {
+                log::warn!("Use on block - failed");
             }
         }
+
         // TODO: implement hanging_roots
     }
 }
